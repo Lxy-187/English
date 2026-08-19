@@ -1,0 +1,8 @@
+# OS / 编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 依赖与构建产物（本项目零构建，留作以后备用）
+node_modules/
+dist/
