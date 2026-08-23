@@ -56,6 +56,18 @@
       type: "enum", def: "auto",
       options: [["auto", "跟随系统"], ["light", "浅色"], ["dark", "深色"]] },
 
+    { id: "review.order", group: "复习", label: "下一条",
+      hint: "顺序＝按库里的排列一条条往下走；随机＝每次随机抽一条",
+      type: "enum", def: "random",
+      options: [["random", "随机"], ["seq", "顺序"]] },
+
+    { id: "review.avoidRepeat", group: "复习", label: "不连抽同一条",
+      hint: "抽到的如果正是当前这条，就重抽一次",
+      type: "enum", def: "on",
+      options: [["on", "开"], ["off", "关"]],
+      when: () => prefs.is("review.order", "random"),
+      whenHint: "顺序模式本来就不会连着给同一条，这一条只在随机时有用" },
+
     { id: "review.scope", group: "复习", label: "复习范围",
       hint: "左下角「随机复习一条」从哪些板块里抽。至少保留一项",
       type: "set", def: ["words", "roots", "essays"],
@@ -75,12 +87,7 @@
       type: "set", def: ROOT_KINDS.map(k => k[0]),
       options: ROOT_KINDS,
       when: () => prefs.has("review.scope", "roots"),
-      whenHint: "「复习范围」里没有勾选词根词缀，这一条暂时不生效" },
-
-    { id: "review.avoidRepeat", group: "复习", label: "不连抽同一条",
-      hint: "抽到的如果正是当前这条，就重抽一次",
-      type: "enum", def: "on",
-      options: [["on", "开"], ["off", "关"]] }
+      whenHint: "「复习范围」里没有勾选词根词缀，这一条暂时不生效" }
   ];
 
   const prefDef = id => PREFS.find(p => p.id === id);
@@ -1904,20 +1911,45 @@
   }
 
   function syncShuffleBtn() {
-    const t = `随机复习一条 · ${reviewScopeText()}（${reviewPool().length} 条，范围在设置里改）`;
-    $("#shuffleBtn").title = t;
-    $("#fabShuffle").title = t;
+    const seq = prefs.is("review.order", "seq");
+    const verb = seq ? "按顺序看下一条" : "随机复习一条";
+    const t = `${verb} · ${reviewScopeText()}（${reviewPool().length} 条，在设置里改）`;
+    /* 图标也要跟着换：交叉箭头是「随机」的意思，顺序模式下用向右的箭头才不误导 */
+    const glyph = seq ? "i-next" : "i-shuffle";
+    [["#shuffleBtn", 18], ["#fabShuffle", 22]].forEach(([sel, size]) => {
+      const el = $(sel);
+      el.title = t;
+      el.setAttribute("aria-label", verb);
+      el.innerHTML = icon(glyph, size);
+    });
   }
 
+  /* 顺序模式的游标。不持久化：只要当前停在池子里的某一条上，
+     下面第一步就会把游标对到那一条，手动翻页之后顺序也不会错位。
+     初值取 -1 表示「还没落位」，这样从首页第一次点会给到第 1 条而不是第 2 条。 */
+  let reviewCursor = -1;
+
   function reviewNext() {
-    let pool = reviewPool();
+    const pool = reviewPool();
     if (!pool.length) { toast("当前复习范围是空的，去设置里勾一项"); return; }
-    if (prefs.is("review.avoidRepeat", "on") && pool.length > 1) {
-      const here = `#/${route.section}${route.id ? "/" + route.id : ""}`;
-      const rest = pool.filter(h => h !== here);
-      if (rest.length) pool = rest;
+
+    const here = `#/${route.section}${route.id ? "/" + route.id : ""}`;
+    const at = pool.indexOf(here);
+    if (at >= 0) reviewCursor = at;              // 跟当前页面对齐
+
+    if (prefs.is("review.order", "seq")) {
+      reviewCursor = (reviewCursor + 1) % pool.length;
+      go(pool[reviewCursor]);
+      return;
     }
-    go(pool[Math.floor(Math.random() * pool.length)]);
+
+    let cand = pool;
+    if (prefs.is("review.avoidRepeat", "on") && pool.length > 1 && at >= 0) {
+      cand = pool.filter(h => h !== here);
+    }
+    const pick = cand[Math.floor(Math.random() * cand.length)];
+    reviewCursor = pool.indexOf(pick);           // 随机跳完也记住位置，切回顺序能接着走
+    go(pick);
   }
   /* 桌面在导轨底部，手机在右下角，同一个动作两个入口 */
   $("#shuffleBtn").addEventListener("click", reviewNext);
