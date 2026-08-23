@@ -381,6 +381,32 @@ HIG 原话：*"Don't use Liquid Glass in the content layer."* 卡片不许用玻
 触摸设备上按钮点击区会自动放大到 40px。
 系统开了「降低透明度」时，所有玻璃退回实色、关掉模糊（见样式表末尾）。
 
+## 部署与缓存
+
+推到 `main` 后 GitHub Pages 会自动构建，通常一两分钟内生效。
+
+**但页面很可能看起来没变**——GitHub Pages 给静态资源的响应头是 `Cache-Control: max-age=600`，
+也就是 10 分钟内浏览器直接用本地副本，连问都不问服务器。更麻烦的是：如果只有 `index.html`
+过期了而 `app.js` 没过期，你会拿到「新 HTML + 旧 JS」的错配状态，那比单纯没刷新更难查。
+
+所以 `index.html` 里所有本地资源都带了版本号：
+
+```html
+<link rel="stylesheet" href="assets/css/styles.css?v=202608231809">
+<script src="assets/js/app.js?v=202608231809"></script>
+```
+
+URL 变了，浏览器就必须重新下载，错配状态不会出现。
+
+**每次推送前先把版本号刷一遍**（一条命令改全部五处）：
+
+```bash
+sed -i -E "s/\?v=[0-9]+/?v=$(date +%Y%m%d%H%M)/g" index.html
+```
+
+想立刻看到最新版而不等缓存过期，硬刷新即可：Windows / Linux 是 `Ctrl+Shift+R`，
+macOS 是 `Cmd+Shift+R`。
+
 ## 本地预览
 
 双击 `index.html` 即可。想用本地服务器（推荐，行为和线上一致）：
