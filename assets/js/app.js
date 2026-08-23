@@ -320,6 +320,111 @@
     }
   };
 
+  /* ============================================================
+     访问记录 —— 首页「最近看过」用
+
+     和访问栈（trail）是两回事：栈是为了原路退回，会随返回弹出，只活在
+     这一次会话里；这里是一份持久的浏览历史，按时间倒序、同一条只留最近一次。
+     只记详情页，列表页和搜索不算「看过某个内容」。
+     ============================================================ */
+  const RECENT_KEY = "el.recent";
+  const RECENT_VERSION = 1;
+  const RECENT_MAX = 60;
+
+  /* 每一类怎么解析成一行。加板块就往这里加一项 */
+  const RECENT_KIND = {
+    words: { label: "单词", en: true,
+      find: id => words.find(x => x.id === id),
+      tag: () => "单词", title: x => x.w, desc: x => x.core },
+    roots: { label: "词根", en: true,
+      find: id => roots.find(x => x.id === id),
+      tag: x => KIND_CN[x.kind], title: x => x.form, desc: x => x.meaning },
+    essays: { label: "范文", en: false,
+      find: id => essays.find(x => x.id === id),
+      tag: () => "范文", title: x => x.title,
+      desc: x => [x.exam, x.year ? x.year + " 年" : null, x.part].filter(Boolean).join(" · ") || x.genre }
+  };
+
+  const recent = {
+    items: [],                                   // [{ k: "words:commit", t: 时间戳 }]
+
+    load() {
+      let raw = null;
+      try { raw = JSON.parse(localStorage.getItem(RECENT_KEY) || "null"); } catch (e) {}
+      const src = (raw && raw.v === RECENT_VERSION && Array.isArray(raw.items)) ? raw.items : [];
+      const seen = new Set();
+      const out = [];
+      src.forEach(it => {
+        if (!it || typeof it.k !== "string" || typeof it.t !== "number") return;
+        if (seen.has(it.k)) return;                        // 同一条只留最近的那次
+        const [kind, id] = it.k.split(":");
+        const d = RECENT_KIND[kind];
+        if (!d || !id || !d.find(id)) return;              // 板块删了、条目删了，记录跟着丢
+        seen.add(it.k);
+        out.push({ k: it.k, t: it.t });
+      });
+      out.sort((a, b) => b.t - a.t);
+      this.items = out.slice(0, RECENT_MAX);
+      let same = false;
+      try { same = JSON.stringify(src) === JSON.stringify(this.items); } catch (e) {}
+      if (!same) this.save();
+    },
+
+    save() {
+      try {
+        localStorage.setItem(RECENT_KEY, JSON.stringify({ v: RECENT_VERSION, items: this.items }));
+      } catch (e) {}
+    },
+
+    record(kind, id) {
+      const d = RECENT_KIND[kind];
+      if (!d || !id || !d.find(id)) return;
+      const k = kind + ":" + id;
+      this.items = [{ k: k, t: Date.now() }]
+        .concat(this.items.filter(x => x.k !== k))
+        .slice(0, RECENT_MAX);
+      this.save();
+    },
+
+    clear() { this.items = []; this.save(); },
+
+    /* 解析成可以直接渲染的行；条目在这期间被删掉就跳过 */
+    rows(kind) {
+      return this.items.reduce((a, it) => {
+        const [k, id] = it.k.split(":");
+        if (kind && kind !== "all" && k !== kind) return a;
+        const d = RECENT_KIND[k];
+        const x = d && d.find(id);
+        if (x) a.push({ kind: k, href: `#/${k}/${id}`, t: it.t,
+                        tag: d.tag(x), title: d.title(x), desc: d.desc(x), en: d.en });
+        return a;
+      }, []);
+    },
+
+    countOf(kind) { return this.rows(kind).length; }
+  };
+
+  /* 相对时间。一天以内说得越细越有用，越久越粗 */
+  function agoText(t) {
+    const d = Date.now() - t;
+    if (d < 6e4) return "刚刚";
+    if (d < 36e5) return Math.floor(d / 6e4) + " 分钟前";
+    if (d < 864e5) return Math.floor(d / 36e5) + " 小时前";
+    const n = Math.floor(d / 864e5);
+    return n < 30 ? n + " 天前" : new Date(t).toLocaleDateString("zh-CN");
+  }
+
+  /* 时间分档：让「按时间排」在页面上看得见，而不是一长条 */
+  function timeBucket(t) {
+    const sameDay = (a, b) =>
+      a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    const now = new Date(), then = new Date(t);
+    if (sameDay(now, then)) return "今天";
+    const y = new Date(now); y.setDate(y.getDate() - 1);
+    if (sameDay(y, then)) return "昨天";
+    return (Date.now() - t < 7 * 864e5) ? "最近 7 天" : "更早";
+  }
+
   /* ---------- 本地存储 ---------- */
   const store = {
     stars: new Set(),
@@ -446,6 +551,7 @@
     if (LEGACY.has(route.section)) { location.replace("#/words"); return; }
 
     updateTrail(prev);
+    if (route.id) recent.record(route.section, route.id);
     const s = sec(route.section);
     $("#pageTitle").innerHTML = route.section === "search"
       ? `搜索结果<small>SEARCH</small>`
@@ -508,7 +614,6 @@
     switch (r.section) {
       case "words":     return find(words, "w");
       case "roots":     return find(roots, "form");
-      case "contrasts": return find(contrasts, "title");
       case "essays":    return find(essays, "title");
       default:          return null;
     }
@@ -637,13 +742,66 @@
       </div>
 
       <div class="block">
-        ${sechead("最近加入")}
-        ${recentList()}
+        ${sechead("最近看过", recent.items.length ? recent.items.length + " 条记录" : null)}
+        <div id="recentBox">${recentBox()}</div>
       </div>
     </div>`;
   };
 
-  function recentList() {
+  /* ---------- 首页的「最近看过」 ----------
+     时间倒序，再按今天 / 昨天 / 最近 7 天 / 更早分档 —— 一长条列表看不出
+     时间感，分了档「按时间排」这件事才在页面上成立。 */
+  let recentKind = "all";
+
+  function recentBox() {
+    if (!recent.items.length) {
+      return `<p class="recent__empty">还没有浏览记录。随便点开一个词条，这里就会按时间记下你看过什么。</p>
+        ${sechead("最近加入")}${addedList()}`;
+    }
+
+    const opts = [["all", "全部"]].concat(
+      Object.keys(RECENT_KIND).map(k => [k, RECENT_KIND[k].label]));
+    const chips = opts.map(([v, l]) => {
+      const n = recent.countOf(v);
+      return `<button class="chip${recentKind === v ? " is-on" : ""}" data-recentkind="${esc(v)}"
+        ${n ? "" : "disabled"}>${esc(l)} ${n}</button>`;
+    }).join("");
+
+    const rows = recent.rows(recentKind);
+    if (!rows.length) {
+      return `<div class="chips" style="margin-bottom:var(--s3)">${chips}</div>
+        <p class="recent__empty">这一类还没有浏览记录。</p>`;
+    }
+
+    /* 按档聚合，档内已经是时间倒序 */
+    const groups = [];
+    rows.forEach(r => {
+      const b = timeBucket(r.t);
+      let g = groups.find(x => x.name === b);
+      if (!g) groups.push(g = { name: b, rows: [] });
+      g.rows.push(r);
+    });
+
+    const body = groups.map(g => `<div class="timegroup">
+      <div class="timegroup__label">${esc(g.name)}<span>${g.rows.length}</span></div>
+      ${g.rows.map(r => `<a class="minirow" href="${r.href}">
+        <span class="tag tag--line">${esc(r.tag)}</span>
+        <span class="minirow__t"${r.en ? "" : ' style="font-family:var(--font-ui)"'}>${esc(r.title)}</span>
+        <span class="minirow__d">${esc(r.desc)}</span>
+        <time class="minirow__time" datetime="${new Date(r.t).toISOString()}">${esc(agoText(r.t))}</time>
+      </a>`).join("")}
+    </div>`).join("");
+
+    return `<div class="chips" style="margin-bottom:var(--s3)">${chips}</div>${body}`;
+  }
+
+  /* 换分类只重画这一块，首页其余部分不动 */
+  function syncRecentBox() {
+    const el = $("#recentBox");
+    if (el) el.innerHTML = recentBox();
+  }
+
+  function addedList() {
     const items = [
       ...roots.slice(-3).map(r => ({ href: `#/roots/${r.id}`, k: KIND_CN[r.kind], t: r.form, d: r.meaning })),
       ...words.slice(-3).map(w => ({ href: `#/words/${w.id}`, k: "单词", t: w.w, d: w.core })),
@@ -1292,6 +1450,8 @@
                 `<button class="btn" data-prefact="reset">恢复默认</button>`)}
           ${row("act.folds", "重置折叠状态", foldHint(),
                 `<button class="btn" data-prefact="folds"${n ? "" : " disabled"}>全部展开</button>`)}
+          ${row("act.recent", "清除浏览记录", recentHint(),
+                `<button class="btn" data-prefact="recent"${recent.items.length ? "" : " disabled"}>清除</button>`)}
         </div>
       </div>
       <p class="settings__note">偏好只存在这台设备的浏览器里（localStorage），换设备不同步。</p>
@@ -1428,6 +1588,9 @@
     const rf = t.closest("[data-rootfilter]");
     if (rf) { rootFilter = rf.dataset.rootfilter; ctrlOpen = true; onRoute(); return; }
 
+    const rk = t.closest("[data-recentkind]");
+    if (rk && !rk.disabled) { recentKind = rk.dataset.recentkind; syncRecentBox(); return; }
+
     const wm = t.closest("[data-wordmastery]");
     if (wm) { wordMastery = wm.dataset.wordmastery; ctrlOpen = true; onRoute(); return; }
 
@@ -1452,6 +1615,7 @@
     const pa = t.closest("[data-prefact]");
     if (pa) {
       if (pa.dataset.prefact === "reset") { prefs.reset(); toast("已恢复默认设置"); }
+      else if (pa.dataset.prefact === "recent") { recent.clear(); recentKind = "all"; toast("浏览记录已清除"); }
       else { store.clearFolds(); toast("折叠状态已重置"); }
       afterPrefChange();
       return;
@@ -1645,6 +1809,9 @@
     const n = Object.keys(store.folds || {}).length;
     return n ? `当前记住了 ${n} 处折叠` : "当前没有记住任何折叠";
   };
+  const recentHint = () => recent.items.length
+    ? `首页「最近看过」里现在有 ${recent.items.length} 条`
+    : "还没有浏览记录";
 
   /* 改完偏好只更新受影响的那几个节点。
      以前这里是 onRoute() 整页重渲染——DOM 全部重建、入场动画重放一遍、
@@ -1679,6 +1846,11 @@
     if (fr) {
       fr.querySelector(".prow__hint").textContent = foldHint();
       fr.querySelector(".btn").disabled = !Object.keys(store.folds || {}).length;
+    }
+    const rr = document.querySelector('#view [data-prow="act.recent"]');
+    if (rr) {
+      rr.querySelector(".prow__hint").textContent = recentHint();
+      rr.querySelector(".btn").disabled = !recent.items.length;
     }
   }
 
@@ -1754,6 +1926,7 @@
   /* ---------- 启动 ---------- */
   prefs.load();
   tags.load();
+  recent.load();
   store.load();
   applyTheme();
   syncShuffleBtn();
