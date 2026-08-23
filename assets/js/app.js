@@ -7,41 +7,352 @@
   "use strict";
 
   const DB = window.DB || {};
-  const words = DB.words || [], roots = DB.roots || [], contrasts = DB.contrasts || [],
-        phrases = DB.phrases || [], essays = DB.essays || [];
+  const words = DB.words || [], roots = DB.roots || [], essays = DB.essays || [];
 
-  /* ---------- 板块配置 ---------- */
+  /* ---------- 板块配置 ----------
+     原来的「关键辨析」已按词拆进 words，「好词好句」已移除，
+     所以单词分析就是 words 本身，一个板块一份数据。 */
   const SECTIONS = [
-    { id: "home",      label: "概览", en: "OVERVIEW",     icon: "i-home",     count: () => null },
-    { id: "words",     label: "单词", full: "单词剖析",   en: "WORD ANATOMY", icon: "i-word",     count: () => words.length },
-    { id: "roots",     label: "词根", full: "词根词缀",   en: "WORD ROOTS",   icon: "i-roots",    count: () => roots.length },
-    { id: "contrasts", label: "辨析", full: "关键辨析",   en: "CONTRASTS",    icon: "i-contrast", count: () => contrasts.length },
-    { id: "phrases",   label: "句库", full: "好词好句",   en: "PHRASES",      icon: "i-phrase",   count: () => phrases.length },
-    { id: "essays",    label: "范文", full: "范文解析",   en: "MODEL ESSAYS", icon: "i-essay",    count: () => essays.length },
-    { id: "starred",   label: "收藏", full: "我的收藏",   en: "STARRED",      icon: "i-star",     count: () => store.stars.size || null }
+    { id: "home",    label: "概览", en: "OVERVIEW",        icon: "i-home",  count: () => null },
+    { id: "words",   label: "单词", full: "单词分析", en: "WORD ANALYSIS", icon: "i-word", group: "学习板块",
+      count: () => words.length },
+    { id: "roots",   label: "词根", full: "词根词缀",   en: "WORD ROOTS",   icon: "i-roots", count: () => roots.length },
+    { id: "essays",  label: "范文", full: "范文解析",   en: "MODEL ESSAYS", icon: "i-essay", count: () => essays.length },
+    { id: "starred",  label: "收藏", full: "我的收藏", en: "STARRED",     icon: "i-star", group: "个人",
+      count: () => store.stars.size || null },
+    { id: "settings", label: "设置", full: "偏好设置", en: "SETTINGS", icon: "i-settings", count: () => null }
   ];
+  /* 合并前的旧地址，遇到就折回单词分析 */
+  const LEGACY = new Set(["analysis", "contrasts", "phrases"]);
+
   const sec = id => SECTIONS.find(s => s.id === id) || SECTIONS[0];
   const secName = s => s.full || s.label;
+
+  /* ============================================================
+     偏好 —— 一处声明，四处派生：存储、界面、校验、重置
+
+     只放「很少改、且在页面里没有自然归宿」的选项。排序、卡片样式这类
+     经常调的，留在各列表页的「视图」面板里，不搬到这儿来
+     （Apple HIG: 主界面放常改的，设置里只放极少改的）。
+
+     每条声明包含：id / 分组 / 标题 / 说明 / 类型 / 默认值 / 可选项。
+     加一条设置＝往这个数组里加一个对象，存储、界面、校验、重置全部自动跟上。
+     ============================================================ */
+  const PREF_KEY = "el.prefs";
+  const PREF_VERSION = 1;
+
+  /* 题型选项直接从 essays 里数出来，常见的排前面。
+     数据里加一种新题型，设置页就自动多一个开关，不用改代码。 */
+  const ESSAY_PARTS = (() => {
+    const n = {};
+    essays.forEach(e => { if (e.part) n[e.part] = (n[e.part] || 0) + 1; });
+    return Object.keys(n).sort((a, b) => n[b] - n[a] || a.localeCompare(b, "zh"));
+  })();
+  const ROOT_KINDS = [["prefix", "前缀"], ["root", "词根"], ["suffix", "后缀"]];
+
+  const PREFS = [
+    { id: "theme", group: "外观", label: "主题",
+      hint: "跟随系统会随 macOS / Windows 的深浅色自动切换",
+      type: "enum", def: "auto",
+      options: [["auto", "跟随系统"], ["light", "浅色"], ["dark", "深色"]] },
+
+    { id: "review.scope", group: "复习", label: "复习范围",
+      hint: "左下角「随机复习一条」从哪些板块里抽。至少保留一项",
+      type: "set", def: ["words", "roots", "essays"],
+      options: [["words", "单词分析"], ["roots", "词根词缀"], ["essays", "范文解析"]] },
+
+    /* 子范围：选项从数据里长出来，加了新题型就自动多一个开关。
+       when 为假时这条设置不生效，界面上会变淡且点不动。 */
+    { id: "review.essayParts", group: "复习", label: "范文题型",
+      hint: "只背小作文或只背大作文，在这里勾",
+      type: "set", def: ESSAY_PARTS.slice(),
+      options: ESSAY_PARTS.map(v => [v, v]),
+      when: () => prefs.has("review.scope", "essays"),
+      whenHint: "「复习范围」里没有勾选范文解析，这一条暂时不生效" },
+
+    { id: "review.rootKinds", group: "复习", label: "词缀类型",
+      hint: "只背前缀、只背后缀，在这里勾",
+      type: "set", def: ROOT_KINDS.map(k => k[0]),
+      options: ROOT_KINDS,
+      when: () => prefs.has("review.scope", "roots"),
+      whenHint: "「复习范围」里没有勾选词根词缀，这一条暂时不生效" },
+
+    { id: "review.avoidRepeat", group: "复习", label: "不连抽同一条",
+      hint: "抽到的如果正是当前这条，就重抽一次",
+      type: "enum", def: "on",
+      options: [["on", "开"], ["off", "关"]] }
+  ];
+
+  const prefDef = id => PREFS.find(p => p.id === id);
+  const optionIds = d => d.options.map(o => o[0]);
+
+  const prefs = {
+    values: {},
+
+    /* 存进来的东西不可信：可能是旧版本写的，可能被手动改过，
+       也可能是另一个标签页写的。一律按注册表校验，坏值退回默认。 */
+    clean(d, v) {
+      if (d.type === "enum") return optionIds(d).indexOf(v) >= 0 ? v : d.def;
+      if (d.type === "set") {
+        if (!Array.isArray(v)) return d.def.slice();
+        const ok = optionIds(d);
+        const out = v.filter(x => ok.indexOf(x) >= 0);
+        return out.length ? out : d.def.slice();      // 空集合会让复习池取不到东西
+      }
+      return d.def;
+    },
+
+    load() {
+      let raw = null;
+      try { raw = JSON.parse(localStorage.getItem(PREF_KEY) || "null"); } catch (e) {}
+      const stored = (raw && raw.v === PREF_VERSION && raw.values) ? raw.values : migrate(raw);
+      PREFS.forEach(d => { this.values[d.id] = this.clean(d, stored[d.id]); });
+      /* 迁移过来的值、以及被校验修掉的坏值，都要写回去。
+         否则迁移只在内存里成立，下次打开又丢了。 */
+      let same = false;
+      try { same = JSON.stringify(stored) === JSON.stringify(this.values); } catch (e) {}
+      if (!same) this.save();
+    },
+
+    get(id) {
+      const v = this.values[id];
+      return Array.isArray(v) ? v.slice() : v;
+    },
+    is(id, v) { return this.get(id) === v; },
+    has(id, v) { return (this.values[id] || []).indexOf(v) >= 0; },
+
+    set(id, v) {
+      const d = prefDef(id);
+      if (!d) return false;
+      this.values[id] = this.clean(d, v);
+      this.save();
+      return true;
+    },
+
+    /* 集合型的开关。最后一项不许关掉，否则功能直接失效 */
+    toggle(id, v) {
+      const d = prefDef(id);
+      if (!d || d.type !== "set") return "noop";
+      const cur = this.values[id] || [];
+      const i = cur.indexOf(v);
+      if (i < 0) { this.values[id] = cur.concat([v]); this.save(); return "on"; }
+      if (cur.length === 1) return "last";
+      this.values[id] = cur.filter(x => x !== v);
+      this.save();
+      return "off";
+    },
+
+    reset() {
+      PREFS.forEach(d => { this.values[d.id] = Array.isArray(d.def) ? d.def.slice() : d.def; });
+      this.save();
+    },
+
+    save() {
+      try {
+        localStorage.setItem(PREF_KEY, JSON.stringify({ v: PREF_VERSION, values: this.values }));
+      } catch (e) { /* 隐私模式下静默降级 */ }
+    }
+  };
+
+  /* 老版本把主题单独存在 el.theme 里，读一次搬过来再删掉。
+     以后改结构就在这里加一段，旧数据永远能升上来。 */
+  function migrate(raw) {
+    const out = (raw && raw.values) ? raw.values : {};
+    try {
+      const legacy = localStorage.getItem("el.theme");
+      if (legacy && out.theme === undefined) out.theme = legacy;
+      localStorage.removeItem("el.theme");
+    } catch (e) {}
+    return out;
+  }
+
+  /* ============================================================
+     单词标签
+
+     两类，区别在「词表由谁定」，不在「值由谁填」：
+       系统标签  选项列表写死在下面这个注册表里（考纲、掌握度）
+       自建标签  词表由你自己攒，用过的词会进入候选，下次直接选
+
+     两种约束：
+       exclusive  互斥，同时只能有一个（掌握度：掌握/熟悉/模糊/不认识）
+       非 exclusive  可叠加（一个词可以既考雅思又考托福，也可以挂好几个自建标签）
+
+     考纲那一组特意不放「考研」：这个库整体就是考研范围，
+     每个词都标一遍等于没标。只标它在别的考试里也考，信息量才在。
+     ============================================================ */
+  const TAG_KEY = "el.tags";
+  const TAG_VERSION = 1;
+  const TAG_MAX_LEN = 12;      // 自建标签的字数上限
+  const TAG_MAX_PER = 8;       // 一个词最多挂几个自建标签
+
+  const TAG_SETS = [
+    { id: "mastery", label: "掌握度", exclusive: true,
+      hint: "复习时随手改，只能选一个",
+      options: [["known", "掌握"], ["familiar", "熟悉"], ["vague", "模糊"], ["unknown", "不认识"]] },
+
+    { id: "exam", label: "考纲", exclusive: false,
+      hint: "考研是本库的基线，标不标都行；重点是标出它在别的考试里也考",
+      options: [["kaoyan", "考研"], ["ielts", "雅思"], ["toefl", "托福"],
+                ["cet", "四六级"], ["gre", "GRE"], ["pte", "PTE"]] },
+
+    { id: "custom", label: "自建", exclusive: false, free: true,
+      hint: "自己定的标签，可以重复用在多个词上" }
+  ];
+
+  const tagSet = id => TAG_SETS.find(t => t.id === id);
+  const tagLabel = (setId, v) => {
+    const d = tagSet(setId);
+    if (!d || d.free) return v;
+    const o = d.options.find(x => x[0] === v);
+    return o ? o[1] : v;
+  };
+
+  const tags = {
+    items: {},                                  // 单词 id -> { mastery, exam[], custom[] }
+
+    /* 存进来的一律不认：词可能被删了，选项可能改过，字符串可能是手改的 */
+    cleanText(t) {
+      return String(t == null ? "" : t).replace(/\s+/g, " ").trim().slice(0, TAG_MAX_LEN);
+    },
+    cleanEntry(raw) {
+      if (!raw || typeof raw !== "object") return null;
+      const out = {};
+      TAG_SETS.forEach(d => {
+        const v = raw[d.id];
+        if (d.free) {
+          if (!Array.isArray(v)) return;
+          const seen = [];
+          v.forEach(t => {
+            const c = this.cleanText(t);
+            if (c && seen.indexOf(c) < 0 && seen.length < TAG_MAX_PER) seen.push(c);
+          });
+          if (seen.length) out[d.id] = seen;
+        } else if (d.exclusive) {
+          if (d.options.some(o => o[0] === v)) out[d.id] = v;
+        } else {
+          if (!Array.isArray(v)) return;
+          const ok = v.filter(x => d.options.some(o => o[0] === x));
+          if (ok.length) out[d.id] = [...new Set(ok)];
+        }
+      });
+      return Object.keys(out).length ? out : null;
+    },
+
+    load() {
+      let raw = null;
+      try { raw = JSON.parse(localStorage.getItem(TAG_KEY) || "null"); } catch (e) {}
+      const src = (raw && raw.v === TAG_VERSION && raw.items) ? raw.items : {};
+      const live = new Set(words.map(w => w.id));
+      const out = {};
+      Object.keys(src).forEach(id => {
+        if (!live.has(id)) return;               // 词已经删了，标签跟着丢
+        const e = this.cleanEntry(src[id]);
+        if (e) out[id] = e;
+      });
+      this.items = out;
+      let same = false;
+      try { same = JSON.stringify(src) === JSON.stringify(out); } catch (e) {}
+      if (!same) this.save();                    // 清理结果写回去，否则每次都要再洗一遍
+    },
+
+    save() {
+      try {
+        localStorage.setItem(TAG_KEY, JSON.stringify({ v: TAG_VERSION, items: this.items }));
+      } catch (e) {}
+    },
+
+    of(id) { return this.items[id] || {}; },
+    val(id, setId) {
+      const d = tagSet(setId), raw = this.of(id)[setId];
+      if (d && d.exclusive) return raw || "";
+      return Array.isArray(raw) ? raw.slice() : [];
+    },
+    has(id, setId, v) {
+      const d = tagSet(setId);
+      return d && d.exclusive ? this.val(id, setId) === v : this.val(id, setId).indexOf(v) >= 0;
+    },
+
+    write(id, setId, v) {
+      const e = Object.assign({}, this.items[id]);
+      if (v === null || (Array.isArray(v) && !v.length) || v === "") delete e[setId];
+      else e[setId] = v;
+      if (Object.keys(e).length) this.items[id] = e; else delete this.items[id];
+      this.save();
+    },
+
+    /* 互斥组：再点一次当前值＝取消，等于「未标记」 */
+    toggle(id, setId, v) {
+      const d = tagSet(setId);
+      if (!d) return;
+      if (d.exclusive) { this.write(id, setId, this.val(id, setId) === v ? null : v); return; }
+      const cur = this.val(id, setId);
+      const i = cur.indexOf(v);
+      this.write(id, setId, i < 0 ? cur.concat([v]) : cur.filter(x => x !== v));
+    },
+
+    addCustom(id, text) {
+      const t = this.cleanText(text);
+      if (!t) return "empty";
+      const cur = this.val(id, "custom");
+      if (cur.indexOf(t) >= 0) return "dup";
+      if (cur.length >= TAG_MAX_PER) return "full";
+      this.write(id, "custom", cur.concat([t]));
+      return "ok";
+    },
+
+    /* 用过的自建标签汇成一份词表，按用得多的排前面 */
+    vocabulary() {
+      const n = {};
+      Object.keys(this.items).forEach(id =>
+        (this.items[id].custom || []).forEach(t => { n[t] = (n[t] || 0) + 1; }));
+      return Object.keys(n).sort((a, b) => n[b] - n[a] || a.localeCompare(b, "zh"));
+    },
+
+    /* 某个值挂在多少个词上，列表页的筛选要用 */
+    count(setId, v) {
+      return words.reduce((k, w) => k + (this.has(w.id, setId, v) ? 1 : 0), 0);
+    },
+    untagged(setId) {
+      return words.reduce((k, w) => {
+        const val = this.val(w.id, setId);
+        return k + ((tagSet(setId).exclusive ? !val : !val.length) ? 1 : 0);
+      }, 0);
+    }
+  };
 
   /* ---------- 本地存储 ---------- */
   const store = {
     stars: new Set(),
-    theme: "auto",
-    sorts: { words: "alpha", roots: "alpha", contrasts: "alpha", phrases: "cat", essays: "year" },
-    cards: { words: "min", roots: "min", contrasts: "min", phrases: "min", essays: "std" },  // min | std | full
+    sorts: { words: "alpha", roots: "alpha", essays: "year" },
+    cards: { words: "min", roots: "min", essays: "std" },   // min | std | full
     folds: {},                                       // 折叠状态：key -> false 表示已折叠，缺省为展开
+    /* localStorage 里的数据活得比代码久：板块删掉了，它写的键还在。
+       所以读进来的每一项都要对着当前的合法值过一遍，认不出来的直接丢。 */
     load() {
+      const kinds = Object.keys(SORTS);
+      const pick = (raw, target, valid) => {
+        Object.keys(raw || {}).forEach(k => {
+          if (kinds.indexOf(k) >= 0 && valid(k, raw[k])) target[k] = raw[k];
+        });
+      };
       try {
-        this.stars = new Set(JSON.parse(localStorage.getItem("el.stars") || "[]"));
-        this.theme = localStorage.getItem("el.theme") || "auto";
-        Object.assign(this.sorts, JSON.parse(localStorage.getItem("el.sorts") || "{}"));
-        Object.assign(this.cards, JSON.parse(localStorage.getItem("el.cards") || "{}"));
-        this.folds = JSON.parse(localStorage.getItem("el.folds") || "{}");
+        const stars = JSON.parse(localStorage.getItem("el.stars") || "[]");
+        const before = stars.length;
+        this.stars = new Set(stars.filter(k => kinds.indexOf(String(k).split(":")[0]) >= 0));
+        if (this.stars.size !== before) this.saveStars();   // 顺手把已删板块的孤儿收藏清掉
+
+        pick(JSON.parse(localStorage.getItem("el.sorts") || "{}"), this.sorts,
+             (k, v) => SORTS[k].some(m => m.id === v));
+        pick(JSON.parse(localStorage.getItem("el.cards") || "{}"), this.cards,
+             (k, v) => CARD_STYLES.some(c => c[0] === v));
+
+        const folds = JSON.parse(localStorage.getItem("el.folds") || "{}");
+        if (folds && typeof folds === "object") this.folds = folds;
       } catch (e) { /* 隐私模式下静默降级 */ }
     },
+    clearFolds() { this.folds = {}; this.saveFolds(); },
     save(k, v) { try { localStorage.setItem("el." + k, JSON.stringify(v)); } catch (e) {} },
     saveStars() { this.save("stars", [...this.stars]); },
-    saveTheme() { try { localStorage.setItem("el.theme", this.theme); } catch (e) {} },
     saveSorts() { this.save("sorts", this.sorts); },
     saveCards() { this.save("cards", this.cards); },
     saveFolds() { this.save("folds", this.folds); },
@@ -68,16 +379,51 @@
     `<button class="star${store.stars.has(key) ? " is-on" : ""}" data-star="${esc(key)}"
       aria-label="收藏 ${esc(label)}" aria-pressed="${store.stars.has(key)}">${icon("i-star", 17)}</button>`;
 
-  /* 构词成分：三档强弱，不用三种色相 */
-  const morph = parts => `<span class="morph">${(parts || []).map((p, i) =>
-    `${i ? '<span class="morph__plus">+</span>' : ""}<span class="morph__part" data-k="${esc(p[2])}"><b>${esc(p[0])}</b><i>${esc(p[1])}</i></span>`
-  ).join("")}</span>`;
+  const KIND_CN = { root: "词根", prefix: "前缀", suffix: "后缀" };
+
+  /* ---------- 构词成分 → 词根条目 ----------
+     词根的 form 写成 "com- / con- / co-" 这种一形多写，任一写法都要能查到。
+     先把所有写法摊平成一张表，剥掉前后连字符，这样 "-ible" 能查到 "-able / -ible"。 */
+  const bareForm = x => String(x == null ? "" : x).replace(/^-+|-+$/g, "").trim().toLowerCase();
+  const ROOT_BY_FORM = (() => {
+    const m = new Map();
+    roots.forEach(r => String(r.form).split(/\s*\/\s*/).forEach(f => {
+      const k = bareForm(f);
+      if (k && !m.has(k)) m.set(k, r);
+    }));
+    return m;
+  })();
+  const rootFor = form => ROOT_BY_FORM.get(bareForm(form)) || null;
+
+  /* 构词成分：三档强弱，不用三种色相。
+     成分本身就是跳转入口 —— 有对应词根条目的直接点进去，没有的点了给提示，
+     所以详情页不再另起一行「相关词根」把链接重复列一遍。 */
+  function morph(parts, opt) {
+    opt = opt || {};
+    return `<span class="morph">${(parts || []).map((p, i) => {
+      const [form, gloss, kind] = p;
+      const r = rootFor(form);
+      const inner = `<b>${esc(form)}</b><i>${esc(gloss)}</i>`;
+      const k = `data-k="${esc(kind)}"`;
+      let el;
+      if (r && r.id === opt.current) {
+        /* 正站在这个词根的页面上，就别再链回自己 */
+        el = `<span class="morph__part morph__part--here" ${k} title="当前条目">${inner}</span>`;
+      } else if (r) {
+        el = `<a class="morph__part morph__part--to" ${k} href="#/roots/${esc(r.id)}"
+          title="${esc(KIND_CN[r.kind])}　${esc(r.form)} · ${esc(r.meaning)}">${inner}</a>`;
+      } else {
+        el = `<button type="button" class="morph__part morph__part--none" ${k}
+          data-noroot="${esc(form)}" title="还没有「${esc(form)}」的词根条目">${inner}</button>`;
+      }
+      return `${i ? '<span class="morph__plus">+</span>' : ""}${el}`;
+    }).join("")}</span>`;
+  }
 
   const MORPH_LEGEND = `<div class="legend">
     <span><i data-k="prefix"></i>前缀</span><span><i data-k="root"></i>词根</span><span><i data-k="suffix"></i>后缀</span>
+    <span class="legend__hint">点成分跳到词根页，虚线的表示条目还没建</span>
   </div>`;
-
-  const KIND_CN = { root: "词根", prefix: "前缀", suffix: "后缀" };
 
   /* ---------- 路由 ---------- */
   let route = { section: "home", id: null, q: "" };
@@ -86,8 +432,8 @@
     const raw = decodeURIComponent(location.hash.replace(/^#\/?/, ""));
     const [head, ...rest] = raw.split("/");
     if (head === "search") return { section: "search", id: null, q: rest.join("/") };
-    const s = SECTIONS.find(x => x.id === head);
-    return { section: s ? s.id : "home", id: rest.join("/") || null, q: "" };
+    const known = SECTIONS.some(x => x.id === head) || LEGACY.has(head);
+    return { section: known ? head : "home", id: rest.join("/") || null, q: "" };
   }
 
   const go = hash => { location.hash = hash; };
@@ -95,6 +441,10 @@
   function onRoute() {
     const prev = route;
     route = parseHash();
+
+    /* 旧地址（#/analysis、#/contrasts、#/phrases）一律折回单词分析 */
+    if (LEGACY.has(route.section)) { location.replace("#/words"); return; }
+
     updateTrail(prev);
     const s = sec(route.section);
     $("#pageTitle").innerHTML = route.section === "search"
@@ -114,13 +464,14 @@
   /* ---------- 导航 ---------- */
   function renderNav() {
     const active = route.section;
-    $("#nav").innerHTML = SECTIONS.map((s, i) => {
+    /* 侧栏只留图标：名称走 title 和 aria-label，分组用一条分隔线代替小标题 */
+    $("#nav").innerHTML = SECTIONS.map(s => {
       const n = s.count();
-      return `${i === 1 ? '<li class="nav-group">学习板块</li>' : ""}${i === 6 ? '<li class="nav-group">个人</li>' : ""}
-      <li><a class="navitem${s.id === active ? " is-active" : ""}" href="#/${s.id}">
-        <span class="navitem__ico">${icon(s.icon, 18)}</span>
-        <span class="navitem__label">${esc(secName(s))}</span>
-        ${n != null ? `<span class="navitem__count">${n}</span>` : ""}
+      const name = secName(s);
+      return `${s.group ? '<li class="nav-sep" aria-hidden="true"></li>' : ""}
+      <li><a class="navitem${s.id === active ? " is-active" : ""}" href="#/${s.id}"
+        title="${esc(name)}" aria-label="${esc(name + (n != null ? "，" + n + " 条" : ""))}">
+        <span class="navitem__ico">${icon(s.icon, 20)}</span>
       </a></li>`;
     }).join("");
 
@@ -226,16 +577,14 @@
 
   /* ---------- 首页 ---------- */
   const TILE_DESC = {
-    words: "一个词为什么有这么多意思",
+    words: "一个词的图景、义项与边界",
     roots: "拆开构词，理解而非硬背",
-    contrasts: "近义与形近词的精确边界",
-    phrases: "可直接调用的句式与搭配",
     essays: "逐句批注，看清好在哪里"
   };
 
   VIEWS.home = function () {
     const totalWords = roots.reduce((n, r) => n + rootWords(r).length, 0);
-    const tiles = SECTIONS.slice(1, 6).map(s => `
+    const tiles = ["words", "roots", "essays"].map(sec).map(s => `
       <a class="tile" href="#/${s.id}">
         <div class="tile__n">${s.count()}</div>
         <div class="tile__t">${esc(secName(s))}</div>
@@ -244,13 +593,13 @@
 
     const pick = (arr, seed) => arr.length ? arr[seed % arr.length] : null;
     const seed = Math.floor(Date.now() / 864e5);           // 每天换一组
-    const r = pick(roots, seed), c = pick(contrasts, seed + 1), p = pick(phrases, seed + 2);
+    const r = pick(roots, seed), w = pick(words, seed + 1), e = pick(essays, seed + 2);
 
     return `<div class="view wrap">
       <section class="hero">
         <h1>今天想理解点什么？</h1>
         <p>这里存放的不是待背清单，而是已经被拆开、讲透的语言知识。
-           共 ${words.length} 个单词剖析、${roots.length} 组词根词缀（带出 ${totalWords} 个派生词）、${contrasts.length} 组辨析、${phrases.length} 条表达、${essays.length} 篇范文解析。</p>
+           共 ${words.length} 个单词分析、${roots.length} 组词根词缀（带出 ${totalWords} 个派生词）、${essays.length} 篇范文解析。</p>
       </section>
 
       <div class="tiles block">${tiles}</div>
@@ -263,15 +612,15 @@
             <div class="en" style="font-size:var(--fs-lg);font-weight:700;margin:2px 0 4px">${esc(r.form)}</div>
             <div style="color:var(--ink-2);font-size:var(--fs-sm)">${esc(r.meaning)} · ${(r.senses || []).length} 层含义</div>
           </a>` : ""}
-          ${c ? `<a class="daily__card" href="#/contrasts/${esc(c.id)}">
-            <div class="daily__kind">辨析 · ${esc(c.tag)}</div>
-            <div class="en" style="font-size:var(--fs-md);font-weight:700;margin:2px 0 4px">${esc(c.title)}</div>
-            <div style="color:var(--ink-2);font-size:var(--fs-sm)">${esc(c.oneLiner)}</div>
+          ${w ? `<a class="daily__card" href="#/words/${esc(w.id)}">
+            <div class="daily__kind">单词${w.pos ? " · " + esc(w.pos) : ""}</div>
+            <div class="en" style="font-size:var(--fs-md);font-weight:700;margin:2px 0 4px">${esc(w.w)}</div>
+            <div style="color:var(--ink-2);font-size:var(--fs-sm)">${esc(w.core)}</div>
           </a>` : ""}
-          ${p ? `<a class="daily__card" href="#/phrases">
-            <div class="daily__kind">表达 · ${esc(p.cat)}</div>
-            <div class="en" style="font-size:var(--fs-md);font-weight:600;margin:2px 0 4px">${esc(p.en)}</div>
-            <div style="color:var(--ink-2);font-size:var(--fs-sm)">${esc(p.zh)}</div>
+          ${e ? `<a class="daily__card" href="#/essays/${esc(e.id)}">
+            <div class="daily__kind">范文 · ${esc(e.genre)}</div>
+            <div style="font-weight:650;font-size:var(--fs-md);margin:2px 0 4px">${esc(e.title)}</div>
+            <div style="color:var(--ink-2);font-size:var(--fs-sm)">${esc(e.prompt)}</div>
           </a>` : ""}
         </div>
       </div>
@@ -286,7 +635,7 @@
   function recentList() {
     const items = [
       ...roots.slice(-3).map(r => ({ href: `#/roots/${r.id}`, k: KIND_CN[r.kind], t: r.form, d: r.meaning })),
-      ...contrasts.slice(-2).map(c => ({ href: `#/contrasts/${c.id}`, k: "辨析", t: c.title, d: c.tag })),
+      ...words.slice(-3).map(w => ({ href: `#/words/${w.id}`, k: "单词", t: w.w, d: w.core })),
       ...essays.slice(-2).map(e => ({ href: `#/essays/${e.id}`, k: "范文", t: e.title, d: e.genre, ui: true }))
     ].reverse();
     return items.map(i => `<a class="minirow" href="${i.href}">
@@ -317,6 +666,15 @@
         group: x => (x.contrasts || []).length || rootsOf(x).length ? "有关联" : "暂无关联",
         order: ["有关联", "暂无关联"],
         cmp: (a, b) => byName(a.w, b.w) },
+      { id: "mastery", label: "掌握度",
+        group: x => { const m = tags.val(x.id, "mastery"); return m ? tagLabel("mastery", m) : "未标记"; },
+        order: ["不认识", "模糊", "熟悉", "掌握", "未标记"],
+        cmp: (a, b) => byName(a.w, b.w) },
+      { id: "exam", label: "考纲",
+        /* 没标不等于「只考考研」，只等于「还没标」，别替用户下断言 */
+        group: x => { const e = tags.val(x.id, "exam");
+          return e.length ? e.map(v => tagLabel("exam", v)).join(" · ") : "未标考纲"; },
+        cmp: (a, b) => byName(a.w, b.w) },
       { id: "star", label: "收藏",
         group: x => store.stars.has("words:" + x.id) ? "已收藏" : "未收藏",
         order: ["已收藏", "未收藏"],
@@ -341,37 +699,6 @@
         group: x => store.stars.has("roots:" + x.id) ? "已收藏" : "未收藏",
         order: ["已收藏", "未收藏"],
         cmp: byForm }
-    ],
-    contrasts: [
-      { id: "alpha", label: "字母",
-        group: x => x.title[0].toUpperCase(),
-        cmp: (a, b) => byName(a.title, b.title) },
-      { id: "tag", label: "类别",
-        group: x => x.tag, order: [...new Set(contrasts.map(c => c.tag))],   // 按数据文件里出现的顺序
-        cmp: (a, b) => byName(a.title, b.title) },
-      { id: "level", label: "难度",
-        group: x => x.level, order: ["核心", "进阶"],
-        cmp: (a, b) => byName(a.title, b.title) },
-      { id: "star", label: "收藏",
-        group: x => store.stars.has("contrasts:" + x.id) ? "已收藏" : "未收藏",
-        order: ["已收藏", "未收藏"],
-        cmp: (a, b) => byName(a.title, b.title) }
-    ],
-    phrases: [
-      { id: "cat", label: "主题",
-        /* 保留数据文件里的编排顺序：观点→因果→让步→数据→举例→结尾→替换→用法→金句 */
-        group: x => x.cat, order: [...new Set(phrases.map(p => p.cat))],
-        cmp: (a, b) => a.id.localeCompare(b.id) },
-      { id: "type", label: "形式",
-        group: x => x.type, order: ["句式", "搭配", "替换", "用法", "金句"],
-        cmp: (a, b) => byName(a.en, b.en) },
-      { id: "alpha", label: "字母",
-        group: x => x.en[0].toUpperCase(),
-        cmp: (a, b) => byName(a.en, b.en) },
-      { id: "star", label: "收藏",
-        group: x => store.stars.has("phrases:" + x.id) ? "已收藏" : "未收藏",
-        order: ["已收藏", "未收藏"],
-        cmp: (a, b) => byName(a.en, b.en) }
     ],
     essays: [
       /* 真题按年份倒序分组，非真题垫底 */
@@ -419,11 +746,12 @@
   const cardStyle = kind => store.cards[kind] || "min";
   const gridCls = (kind, base) => `${base} cards-${cardStyle(kind)}`;
 
-  /* 列表页顶部：一个「视图」按钮装下筛选 + 排序 + 卡片样式，外加全部折叠 */
-  function listBar(kind, filter) {
+  /* 列表页顶部：一个「视图」按钮装下筛选 + 排序 + 卡片样式，外加全部折叠
+     filters 可以给多组，比如单词分析里「只看哪一类」和「句子的形式」各是一组 */
+  function listBar(kind, filters) {
     const curSort = store.sorts[kind], curCard = cardStyle(kind);
-    const groups = [];
-    if (filter) groups.push({ label: filter.label, chips: filter.chips });
+    const list = filters ? [].concat(filters) : [];
+    const groups = list.map(f => ({ label: f.label, chips: f.chips }));
     groups.push({
       label: "排序 / 分组",
       chips: SORTS[kind].map(s =>
@@ -434,8 +762,7 @@
       chips: CARD_STYLES.map(([id, l]) =>
         `<button class="chip${id === curCard ? " is-on" : ""}" data-cardstyle="${kind}:${id}">${l}</button>`).join("")
     });
-    const state = [];
-    if (filter) state.push(filter.current);
+    const state = list.map(f => f.current);
     state.push(sortMode(kind).label);
     state.push((CARD_STYLES.find(c => c[0] === curCard) || CARD_STYLES[0])[1]);
     return ctrlbar(ctrl(state, groups));
@@ -474,10 +801,7 @@
     const out = new Map();
     (x.rootRefs || []).forEach(id => { const r = roots.find(v => v.id === id); if (r) out.set(r.id, r); });
     (x.parts || []).forEach(p => {
-      const form = String(p[0]).replace(/^-+|-+$/g, "").toLowerCase();
-      if (!form) return;
-      const r = roots.find(v => v.form.toLowerCase().split(/\s*\/\s*/)
-        .some(f => f.replace(/^-+|-+$/g, "").trim() === form));
+      const r = rootFor(p[0]);
       if (r) out.set(r.id, r);
     });
     return [...out.values()];
@@ -499,16 +823,37 @@
     return BACKLINKS;
   }
 
+  let wordMastery = "all";
+
   VIEWS.words = function (r) {
     if (r.id) {
       const x = words.find(v => v.id === r.id);
-      return x ? `<div class="view wrap--read">${detailBar("#/words", "单词剖析")}${wordDetail(x)}</div>`
-        : notFound("#/words", "单词剖析");
+      return x ? `<div class="view wrap--read">${detailBar("#/words", "单词分析")}${wordDetail(x)}</div>`
+        : notFound("#/words", "单词分析");
     }
+
+    const md = tagSet("mastery");
+    const opts = [["all", "全部", words.length]]
+      .concat(md.options.map(([v, l]) => [v, l, tags.count("mastery", v)]))
+      .concat([["none", "未标记", tags.untagged("mastery")]]);
+    const cur = opts.find(o => o[0] === wordMastery) || opts[0];
+    const filter = {
+      label: "只看掌握度",
+      current: cur[1],
+      chips: opts.map(([v, l, n]) =>
+        `<button class="chip${wordMastery === v ? " is-on" : ""}" data-wordmastery="${esc(v)}">${esc(l)} ${n}</button>`).join("")
+    };
+
+    const list = words.filter(x => {
+      if (wordMastery === "all") return true;
+      const m = tags.val(x.id, "mastery");
+      return wordMastery === "none" ? !m : m === wordMastery;
+    });
+
     return `<div class="view wrap">
-      ${listBar("words")}
-      ${words.length ? groupedGrid("words", words, wordCard, "cardgrid cardgrid--root")
-                     : empty("还没有单词", "在 data/words.js 里追加条目即可。")}
+      ${listBar("words", [filter])}
+      ${list.length ? groupedGrid("words", list, wordCard, "cardgrid cardgrid--root")
+                    : empty("这一档还没有单词", "去某个单词页把掌握度标上，它就会出现在这里。")}
     </div>`;
   };
 
@@ -516,11 +861,66 @@
     const st = cardStyle("words");
     return `<div class="entry entry--${st}">
       ${st === "full" ? `<div class="entry__top"><span class="tag tag--line">${(x.senses || []).length} 个义项</span></div>` : ""}
-      <a class="entry__form entry__link" href="#/words/${esc(x.id)}">${esc(x.w)}</a>
+      <div class="entry__id">${masteryDot(x.id)}<a class="entry__form entry__link" href="#/words/${esc(x.id)}">${esc(x.w)}</a></div>
       ${st === "min" ? "" : `<div class="entry__mean" style="font-weight:550">${esc(x.core)}</div>`}
       ${st === "full" && x.image ? `<p class="entry__desc">${esc(x.image)}</p>` : ""}
       ${starBtn("words:" + x.id, x.w)}
     </div>`;
+  };
+
+  /* ---------- 标签条 ----------
+     放在标题下面常驻，不塞进折叠区：掌握度是复习时最高频的动作，
+     每次还要先展开一层就没人会用了。 */
+  function tagBar(x) {
+    const row = d => {
+      let chips;
+      if (d.free) {
+        const cur = tags.val(x.id, "custom");
+        const vocab = tags.vocabulary().filter(t => cur.indexOf(t) < 0);
+        chips = cur.map(t =>
+          `<button class="chip chip--tag is-on" data-tag="custom" data-val="${esc(t)}"
+            title="点一下移除">${esc(t)}<span class="chip__x" aria-hidden="true">×</span></button>`).join("")
+          + `<span class="tagadd">
+               <input type="text" list="tagvocab" maxlength="${TAG_MAX_LEN}" data-tagadd
+                      placeholder="＋ 标签" aria-label="新增自建标签" autocomplete="off">
+             </span>`
+          + `<datalist id="tagvocab">${vocab.map(t => `<option value="${esc(t)}"></option>`).join("")}</datalist>`;
+      } else {
+        chips = d.options.map(([v, l]) =>
+          `<button class="chip chip--tag${tags.has(x.id, d.id, v) ? " is-on" : ""}"
+            data-tag="${esc(d.id)}" data-val="${esc(v)}" data-kind="${esc(d.id === "mastery" ? v : d.id)}"
+            aria-pressed="${tags.has(x.id, d.id, v)}">${esc(l)}</button>`).join("");
+      }
+      return `<div class="tagrow">
+        <span class="tagrow__label" title="${esc(d.hint)}">${esc(d.label)}</span>
+        <div class="chips">${chips}</div>
+      </div>`;
+    };
+    return `<div class="tagbar" data-tagbar="${esc(x.id)}">
+      ${TAG_SETS.map(row).join("")}
+      <p class="tagbar__note">考纲这一组是并列的，可以多选。本库整体就是考研范围，所以「考研」标不标都行，
+        真正有信息量的是标出它<b>在别的考试里也考</b>；空着只表示还没标过，不代表它只考考研。</p>
+    </div>`;
+  }
+
+  /* 改标签只重画这一条，不动整页 —— 和设置页同一个道理 */
+  function syncTagBar(id) {
+    const el = document.querySelector(`[data-tagbar="${id}"]`);
+    if (!el) return;
+    const x = words.find(w => w.id === id);
+    if (!x) return;
+    const focused = document.activeElement && document.activeElement.hasAttribute("data-tagadd");
+    el.outerHTML = tagBar(x);
+    if (focused) {
+      const inp = document.querySelector(`[data-tagbar="${id}"] [data-tagadd]`);
+      if (inp) inp.focus();
+    }
+  }
+
+  /* 卡片上的掌握度：一个小圆点，不占地方也不抢眼 */
+  const masteryDot = id => {
+    const m = tags.val(id, "mastery");
+    return m ? `<span class="mdot" data-kind="${esc(m)}" title="掌握度：${esc(tagLabel("mastery", m))}"></span>` : "";
   };
 
   /* 指向另一个条目的小链接 */
@@ -530,8 +930,10 @@
     ${sub ? `<span class="xlink__d">${esc(sub)}</span>` : ""}
   </a>`;
 
+  /* 有多少个构词成分能点进词根页 */
+  const linkedParts = parts => (parts || []).filter(p => rootFor(p[0])).length;
+
   function wordDetail(x) {
-    const rel = rootsOf(x);
     const back = backlinks().word[x.id] || [];
     /* 正向对比里已经出现过的词，反向就不再重复列一遍 */
     const fwdIds = new Set((x.contrasts || []).map(c => String(c.w).toLowerCase()));
@@ -540,38 +942,38 @@
     return `<article>
       <header class="page__head page__row">
         <div style="flex:1;min-width:0">
-          <div class="page__eyebrow">单词剖析${x.pos ? " · " + esc(x.pos) : ""}</div>
+          <div class="page__eyebrow">单词分析${x.pos ? " · " + esc(x.pos) : ""}</div>
           <h1 class="page__form">${esc(x.w)}</h1>
         </div>
         ${starBtn("words:" + x.id, x.w)}
       </header>
 
+      ${tagBar(x)}
+
       ${fold("d.word.core", "核心图景", null,
         `<div class="callout"><p style="font-size:var(--fs-md)">${md(x.core)}</p></div>
          ${x.image ? `<p class="wordimage">${md(x.image)}</p>` : ""}`)}
 
-      ${(x.origin || (x.parts && x.parts.length) || rel.length) ? fold("d.word.morph", "构词与词源", null,
+      ${(x.origin || (x.parts && x.parts.length)) ? fold("d.word.morph", "构词与词源",
+        linkedParts(x.parts) ? linkedParts(x.parts) + " 个成分可点开" : null,
         `${x.origin ? `<p class="wordorigin">${md(x.origin)}</p>` : ""}
-         ${x.parts && x.parts.length ? `<div style="margin:var(--s3) 0">${morph(x.parts)}</div>${MORPH_LEGEND}` : ""}
-         ${rel.length ? `<div class="xlinks" style="margin-top:var(--s3)">
-            ${rel.map(rt => xlink("#/roots/" + esc(rt.id), rt.form, rt.meaning)).join("")}
-          </div>` : ""}`) : ""}
+         ${x.parts && x.parts.length ? `<div style="margin:var(--s3) 0">${morph(x.parts)}</div>${MORPH_LEGEND}` : ""}`) : ""}
 
-      ${fold("d.word.senses", "义项", (x.senses || []).length + " 个",
+      ${(x.senses || []).length ? fold("d.word.senses", "义项", (x.senses || []).length + " 个",
         (x.senses || []).map((s, i) => `<section class="sense">
           <div class="sense__head">
             <span class="sense__n">${i + 1}</span>
             <h3 class="sense__dim">${esc(s.dim)}</h3>
             ${s.tag ? `<span class="tag">${esc(s.tag)}</span>` : ""}
           </div>
-          <div class="sense__zh">${esc(s.zh)}</div>
+          ${s.zh ? `<div class="sense__zh">${esc(s.zh)}</div>` : ""}
           <p class="sense__scene">${md(s.scene)}</p>
           ${s.feature ? `<p class="sense__feature"><b>状态特征 · </b>${md(s.feature)}</p>` : ""}
           ${(s.ex || []).map(e => `<div class="sense__ex">
             <p class="sense__exen">${esc(e.en)}</p>
             <p class="sense__exzh">${esc(e.zh)}</p>
           </div>`).join("")}
-        </section>`).join(""))}
+        </section>`).join("")) : ""}
 
       ${(x.contrasts && x.contrasts.length) || backOnly.length ? fold("d.word.links", "边界与关联",
         ((x.contrasts || []).length + backOnly.length) + " 条",
@@ -593,6 +995,18 @@
             </div>
             <p class="rel__note">${md(b.note)}</p>
           </div>`).join("")}`) : ""}
+
+      ${x.pitfalls && x.pitfalls.length ? fold("d.word.pitfalls", "易错点", x.pitfalls.length + " 条",
+        `<ul class="pitfalls card card--pad">${x.pitfalls.map(v => `<li>${md(v)}</li>`).join("")}</ul>`) : ""}
+
+      ${x.drills && x.drills.length ? fold("d.word.drills", "自测", "点一下看答案",
+        x.drills.map((d, i) => `<div class="drill">
+          <p class="drill__q">${esc(d.q)}</p>
+          <button class="btn" style="margin-top:var(--s2)" data-drill="${i}">显示答案</button>
+          <div class="drill__a" hidden>
+            <span class="drill__ans">${esc(d.a)}</span> — <span class="drill__why">${esc(d.why)}</span>
+          </div>
+        </div>`).join("")) : ""}
 
       ${x.summary ? fold("d.word.summary", "一句话带走", null,
         `<div class="callout"><p>${md(x.summary)}</p></div>`) : ""}
@@ -621,7 +1035,7 @@
     };
 
     return `<div class="view wrap">
-      ${listBar("roots", filter)}
+      ${listBar("roots", [filter])}
       ${list.length ? groupedGrid("roots", list, rootCard, "cardgrid cardgrid--root") : empty("这一类还没有内容")}
     </div>`;
   };
@@ -676,7 +1090,7 @@
                  <span class="wordrow__w">${esc(w.w)}</span>
                  <span class="wordrow__def">${esc(w.def)}</span>
                </div>
-               <div class="wordrow__morph">${morph(w.parts)}</div>
+               <div class="wordrow__morph">${morph(w.parts, { current: x.id })}</div>
                ${w.ex ? `<p class="wordrow__ex">${esc(w.ex)}</p>` : ""}
              </div>`).join("")}
          </div>`,
@@ -691,116 +1105,6 @@
           xlink("#/words/" + esc(w.id), w.w, w.core)).join("")}</div>`) : ""}
     </article>`;
   }
-
-  /* ---------- 关键辨析 ---------- */
-  VIEWS.contrasts = function (r) {
-    if (r.id) {
-      const x = contrasts.find(v => v.id === r.id);
-      return x ? `<div class="view wrap--read">${detailBar("#/contrasts", "关键辨析")}${contrastDetail(x)}</div>`
-        : notFound("#/contrasts", "关键辨析");
-    }
-    return `<div class="view wrap">
-      ${listBar("contrasts")}
-      ${contrasts.length ? groupedGrid("contrasts", contrasts, contrastCard, "cardgrid cardgrid--cmp") : empty("还没有辨析条目")}
-    </div>`;
-  };
-
-  const contrastCard = x => {
-    const st = cardStyle("contrasts");
-    return `<div class="entry entry--${st}">
-      ${st === "min" ? "" : `<div class="entry__top"><span class="tag tag--line">${esc(x.tag)}</span></div>`}
-      <a class="entry__title entry__link" href="#/contrasts/${esc(x.id)}">${esc(x.title)}</a>
-      ${st === "full" ? `<p class="entry__desc">${esc(x.oneLiner)}</p>
-        <div class="entry__foot">
-          <span class="tag">${esc(x.level)}</span>
-          <span class="entry__n">${x.items.length} 词${x.drills ? " · " + x.drills.length + " 题" : ""}</span>
-        </div>` : ""}
-      ${starBtn("contrasts:" + x.id, x.title)}
-    </div>`;
-  };
-
-  function contrastDetail(x) {
-    return `<article>
-      <header class="page__head page__row">
-        <div style="flex:1;min-width:0">
-          <div class="page__eyebrow">${esc(x.tag)} · ${esc(x.level)}</div>
-          <h1 class="page__title">${esc(x.title)}</h1>
-        </div>
-        ${starBtn("contrasts:" + x.id, x.title)}
-      </header>
-
-      ${fold("d.cmp.oneliner", "一句话区分", null,
-        `<div class="callout"><p>${md(x.oneLiner)}</p></div>`)}
-
-      ${fold("d.cmp.items", "逐词拆解", x.items.length + " 个",
-        `<div class="cmp" data-n="${x.items.length}">
-          ${x.items.map(i => `<div class="cmpcell">
-            <div><span class="cmpcell__w">${esc(i.w)}</span><span class="cmpcell__pos">${esc(i.pos)}</span></div>
-            <div class="cmpcell__core">${esc(i.core)}</div>
-            <p class="cmpcell__nuance">${md(i.nuance)}</p>
-            ${i.ex ? `<p class="cmpcell__ex">${esc(i.ex)}</p><p class="cmpcell__exzh">${esc(i.exZh || "")}</p>` : ""}
-          </div>`).join("")}
-        </div>`)}
-
-      ${x.pitfalls && x.pitfalls.length ? fold("d.cmp.pitfalls", "易错点", x.pitfalls.length + " 条",
-        `<ul class="pitfalls card card--pad">${x.pitfalls.map(p => `<li>${md(p)}</li>`).join("")}</ul>`) : ""}
-
-      ${x.drills && x.drills.length ? fold("d.cmp.drills", "自测", "点一下看答案",
-        x.drills.map((d, i) => `<div class="drill">
-          <p class="drill__q">${esc(d.q)}</p>
-          <button class="btn" style="margin-top:var(--s2)" data-drill="${i}">显示答案</button>
-          <div class="drill__a" hidden>
-            <span class="drill__ans">${esc(d.a)}</span> — <span class="drill__why">${esc(d.why)}</span>
-          </div>
-        </div>`).join("")) : ""}
-    </article>`;
-  }
-
-  /* ---------- 好词好句 ---------- */
-  let phraseType = "全部";
-
-  VIEWS.phrases = function () {
-    const types = ["全部", ...new Set(phrases.map(p => p.type))];
-    const list = phrases.filter(p => phraseType === "全部" || p.type === phraseType);
-    const filter = {
-      label: "只看",
-      current: phraseType,
-      chips: types.map(t => `<button class="chip${phraseType === t ? " is-on" : ""}" data-phrasetype="${esc(t)}">${esc(t)}${
-        t === "全部" ? " " + phrases.length : " " + phrases.filter(p => p.type === t).length}</button>`).join("")
-    };
-
-    return `<div class="view wrap">
-      ${listBar("phrases", filter)}
-      ${list.length ? groupedGrid("phrases", list, phraseCard, "pgrid") : empty("这一类还没有内容")}
-    </div>`;
-  };
-
-  /* 句库没有详情页，所以极简样式做成「点开揭示」：正面只有英文，点一下出中文和注解 */
-  const phraseCard = p => {
-    const st = cardStyle("phrases");
-    const copyBtn = `<button class="btn btn--ghost btn--icon" data-copy="${esc(p.en)}" title="复制英文" aria-label="复制英文"
-      style="margin-left:auto;width:26px;height:26px">${icon("i-copy", 14)}</button>`;
-    const foot = `<div class="phrase__foot">
-      <span class="tag tag--accent">${esc(p.type)}</span>
-      ${st === "min" || st === "full" ? (p.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join("") : ""}
-      ${copyBtn}
-    </div>`;
-    const body = `<p class="phrase__zh">${esc(p.zh)}</p>
-      ${st !== "std" && p.note ? `<p class="phrase__note">${md(p.note)}</p>` : ""}
-      ${foot}`;
-
-    if (st === "min") return `<article class="phrase phrase--min" data-phrase role="button" tabindex="0" aria-expanded="false">
-      <p class="phrase__en">${esc(p.en)}</p>
-      <div class="phrase__body">${body}</div>
-      ${starBtn("phrases:" + p.id, p.en)}
-    </article>`;
-
-    return `<article class="phrase">
-      <p class="phrase__en">${esc(p.en)}</p>
-      ${body}
-      ${starBtn("phrases:" + p.id, p.en)}
-    </article>`;
-  };
 
   /* ---------- 范文解析 ---------- */
   let essayExam = "全部";
@@ -821,7 +1125,7 @@
     };
 
     return `<div class="view wrap">
-      ${listBar("essays", filter)}
+      ${listBar("essays", [filter])}
       ${list.length ? groupedGrid("essays", list, essayCard, "cardgrid cardgrid--cmp")
                     : empty("这一类还没有范文", "在 data/essays.js 里追加条目即可。")}
     </div>`;
@@ -867,7 +1171,7 @@
           <div style="flex:1;min-width:0">
             <div class="page__eyebrow">${esc([e.exam, e.year ? e.year + " 年" : null, e.part].filter(Boolean).join(" · ") || e.genre)}</div>
             <h1 style="font-size:var(--fs-xl);margin:6px 0 8px">${esc(e.title)}</h1>
-            <div class="phrase__foot">
+            <div class="metarow">
               <span class="tag tag--accent">${esc(e.level)}</span>
               <span class="tag">${esc(e.genre)}</span>
               ${e.topic ? `<span class="tag">${esc(e.topic)}</span>` : ""}
@@ -917,10 +1221,10 @@
     const keys = [...store.stars];
     if (!keys.length) return `<div class="view wrap">${empty("还没有收藏", "在任何条目右上角点星号，就会出现在这里。")}</div>`;
 
-    const g = { words: [], roots: [], contrasts: [], phrases: [], essays: [] };
+    const g = { words: [], roots: [], essays: [] };
     keys.forEach(k => {
       const [t, id] = k.split(":");
-      const src = { words, roots, contrasts, phrases, essays }[t];
+      const src = { words, roots, essays }[t];
       const item = src && src.find(x => x.id === id);
       if (item) g[t].push(item);
     });
@@ -928,11 +1232,58 @@
     const section = (title, n, html) => n ? `<div class="block">${sechead(title, n + " 条")}${html}</div>` : "";
 
     return `<div class="view wrap">
-      ${section("单词剖析", g.words.length, `<div class="${gridCls("words", "cardgrid cardgrid--root")}">${g.words.map(wordCard).join("")}</div>`)}
+      ${section("单词分析", g.words.length, `<div class="${gridCls("words", "cardgrid cardgrid--root")}">${g.words.map(wordCard).join("")}</div>`)}
       ${section("词根词缀", g.roots.length, `<div class="${gridCls("roots", "cardgrid cardgrid--root")}">${g.roots.map(rootCard).join("")}</div>`)}
-      ${section("关键辨析", g.contrasts.length, `<div class="${gridCls("contrasts", "cardgrid cardgrid--cmp")}">${g.contrasts.map(contrastCard).join("")}</div>`)}
-      ${section("好词好句", g.phrases.length, `<div class="${gridCls("phrases", "pgrid")}">${g.phrases.map(phraseCard).join("")}</div>`)}
       ${section("范文解析", g.essays.length, `<div class="${gridCls("essays", "cardgrid cardgrid--cmp")}">${g.essays.map(essayCard).join("")}</div>`)}
+    </div>`;
+  };
+
+  /* ---------- 偏好设置 ----------
+     整页由 PREFS 注册表渲染出来，没有一行是为某个具体设置手写的 */
+  VIEWS.settings = function () {
+    const groups = [];
+    PREFS.forEach(d => {
+      let g = groups.find(x => x.name === d.group);
+      if (!g) groups.push(g = { name: d.group, items: [] });
+      g.items.push(d);
+    });
+
+    const control = d => {
+      const attr = d.type === "enum" ? "data-pref" : "data-preftoggle";
+      const on = v => d.type === "enum" ? prefs.is(d.id, v) : prefs.has(d.id, v);
+      const off = prefOff(d) ? " disabled" : "";
+      return `<div class="chips">${d.options.map(([v, l]) =>
+        `<button class="chip${on(v) ? " is-on" : ""}" ${attr}="${esc(d.id)}" data-val="${esc(v)}"
+          aria-pressed="${on(v)}"${off}>${esc(l)}</button>`).join("")}</div>`;
+    };
+
+    const row = (id, label, hint, ctl, off) => `<div class="prow${off ? " prow--off" : ""}" data-prow="${esc(id)}">
+      <div class="prow__main">
+        <div class="prow__label">${esc(label)}</div>
+        <div class="prow__hint">${esc(hint || "")}</div>
+      </div>
+      <div class="prow__ctl">${ctl}</div>
+    </div>`;
+
+    const body = groups.map(g => `<div class="block">
+      ${sechead(g.name)}
+      <div class="card">${g.items.map(d =>
+        row(d.id, d.label, prefHint(d), control(d), prefOff(d))).join("")}</div>
+    </div>`).join("");
+
+    const n = store.folds ? Object.keys(store.folds).length : 0;
+    return `<div class="view wrap--read">
+      ${body}
+      <div class="block">
+        ${sechead("数据")}
+        <div class="card">
+          ${row("act.reset", "恢复默认设置", "只重置上面这些偏好，收藏和折叠状态不受影响",
+                `<button class="btn" data-prefact="reset">恢复默认</button>`)}
+          ${row("act.folds", "重置折叠状态", foldHint(),
+                `<button class="btn" data-prefact="folds"${n ? "" : " disabled"}>全部展开</button>`)}
+        </div>
+      </div>
+      <p class="settings__note">偏好只存在这台设备的浏览器里（localStorage），换设备不同步。</p>
     </div>`;
   };
 
@@ -943,7 +1294,8 @@
        card = false  卡片内部的一个片段（一层义项、一个派生词、一条可迁移表达）
      卡片条目会排在片段之前，所以搜「前缀」先出 8 张前缀卡，而不是正文里碰巧提到的句子。
      ============================================================ */
-  const SEC_LABEL = { words: "单词剖析", roots: "词根词缀", contrasts: "关键辨析", phrases: "好词好句", essays: "范文解析" };
+  /* 搜索结果的分类筛选跟着导航走：三类合并成单词分析，where 里仍写明是哪一类 */
+  const SEC_LABEL = { words: "单词分析", roots: "词根词缀", essays: "范文解析" };
 
   let INDEX = null;
   function buildIndex() {
@@ -952,13 +1304,15 @@
     const push = e => INDEX.push(e);
 
     words.forEach(x => {
-      push({ sec: "words", card: true, href: `#/words/${x.id}`, where: "单词剖析", title: x.w, sub: x.core,
+      push({ sec: "words", card: true, href: `#/words/${x.id}`, where: "单词分析", title: x.w, sub: x.core,
         text: ["单词剖析", x.w, x.pos, x.core, x.image, x.origin, x.summary,
                (x.senses || []).map(v => [v.dim, v.tag, v.zh].join(" ")).join(" "),
                (x.parts || []).map(v => v[0] + " " + v[1]).join(" "),
-               (x.contrasts || []).map(v => v.w).join(" ")].join(" ") });
+               (x.contrasts || []).map(v => v.w + " " + v.note).join(" "),
+               (x.pitfalls || []).join(" "),
+               (x.drills || []).map(d => [d.q, d.a, d.why].join(" ")).join(" ")].join(" ") });
       (x.senses || []).forEach(v => push({ sec: "words", card: false, href: `#/words/${x.id}`,
-        where: "义项 · " + x.w, title: v.zh, sub: v.dim,
+        where: "义项 · " + x.w, title: v.zh || v.dim, sub: v.zh ? v.dim : "",
         text: [v.dim, v.tag, v.zh, v.scene, v.feature,
                (v.ex || []).map(e => e.en + " " + e.zh).join(" ")].join(" ") }));
     });
@@ -978,16 +1332,6 @@
           text: [w.w, w.def, w.ex].join(" ") }));
       });
     });
-
-    contrasts.forEach(c => push({ sec: "contrasts", card: true, href: `#/contrasts/${c.id}`,
-      where: "关键辨析 · " + c.tag, title: c.title, sub: c.oneLiner,
-      text: ["关键辨析 辨析", c.tag, c.level, c.title, c.oneLiner,
-             c.items.map(i => [i.w, i.pos, i.core, i.nuance, i.ex].join(" ")).join(" "),
-             (c.pitfalls || []).join(" ")].join(" ") }));
-
-    phrases.forEach(p => push({ sec: "phrases", card: true, href: "#/phrases",
-      where: p.cat + " · " + p.type, title: p.en, sub: p.zh,
-      text: ["好词好句 句库", p.cat, p.type, p.en, p.zh, p.note, (p.tags || []).join(" ")].join(" ") }));
 
     essays.forEach(e => {
       push({ sec: "essays", card: true, href: `#/essays/${e.id}`,
@@ -1011,9 +1355,9 @@
     const lq = q.toLowerCase();
 
     const scored = buildIndex().map(x => {
-      const t = x.text.toLowerCase(), i = t.indexOf(lq);
+      const t = String(x.text || "").toLowerCase(), i = t.indexOf(lq);
       if (i < 0) return null;
-      const ti = x.title.toLowerCase().indexOf(lq);
+      const ti = String(x.title || "").toLowerCase().indexOf(lq);
       const tier = ti === 0 ? 0 : ti > 0 ? 1 : 2;     // 标题命中优先
       return { x, score: tier * 100000 + (x.card ? 0 : 40000) + i };   // 同档内卡片优先
     }).filter(Boolean).sort((a, b) => a.score - b.score).map(h => h.x);
@@ -1068,8 +1412,42 @@
     const rf = t.closest("[data-rootfilter]");
     if (rf) { rootFilter = rf.dataset.rootfilter; ctrlOpen = true; onRoute(); return; }
 
-    const pt = t.closest("[data-phrasetype]");
-    if (pt) { phraseType = pt.dataset.phrasetype; ctrlOpen = true; onRoute(); return; }
+    const wm = t.closest("[data-wordmastery]");
+    if (wm) { wordMastery = wm.dataset.wordmastery; ctrlOpen = true; onRoute(); return; }
+
+    const tg = t.closest("[data-tag]");
+    if (tg) {
+      const bar = tg.closest("[data-tagbar]");
+      if (bar) { tags.toggle(bar.dataset.tagbar, tg.dataset.tag, tg.dataset.val); syncTagBar(bar.dataset.tagbar); }
+      return;
+    }
+
+    const pf = t.closest("[data-pref]");
+    if (pf && !pf.disabled) { prefs.set(pf.dataset.pref, pf.dataset.val); afterPrefChange(); return; }
+
+    const pft = t.closest("[data-preftoggle]");
+    if (pft && !pft.disabled) {
+      const r = prefs.toggle(pft.dataset.preftoggle, pft.dataset.val);
+      if (r === "last") { toast("至少要保留一项，否则没东西可抽"); return; }
+      afterPrefChange();
+      return;
+    }
+
+    const pa = t.closest("[data-prefact]");
+    if (pa) {
+      if (pa.dataset.prefact === "reset") { prefs.reset(); toast("已恢复默认设置"); }
+      else { store.clearFolds(); toast("折叠状态已重置"); }
+      afterPrefChange();
+      return;
+    }
+
+    /* 构词成分指向的词根还没建 —— 给个提示，而不是一个点不动的死链 */
+    const nr = t.closest("[data-noroot]");
+    if (nr) {
+      e.preventDefault();
+      toast(`还没有「${nr.dataset.noroot}」的词根条目，可以在 data/roots.js 里补上`);
+      return;
+    }
 
     const ee = t.closest("[data-essayexam]");
     if (ee) { essayExam = ee.dataset.essayexam; ctrlOpen = true; onRoute(); return; }
@@ -1113,15 +1491,28 @@
 
     const an = t.closest("[data-anno]");
     if (an) { toggleAnno(an); return; }
+  });
 
-    const ph = t.closest("[data-phrase]");
-    if (ph) { revealPhrase(ph); return; }
+  /* 自建标签：回车提交，Esc 放弃 */
+  document.addEventListener("keydown", e => {
+    const inp = e.target.closest && e.target.closest("[data-tagadd]");
+    if (inp) {
+      if (e.key === "Escape") { inp.value = ""; inp.blur(); return; }
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      const bar = inp.closest("[data-tagbar]");
+      const r = tags.addCustom(bar.dataset.tagbar, inp.value);
+      inp.value = "";
+      if (r === "full") toast(`一个词最多挂 ${TAG_MAX_PER} 个自建标签`);
+      else if (r === "dup") toast("这个标签已经在了");
+      else if (r === "ok") syncTagBar(bar.dataset.tagbar);
+      return;
+    }
   });
 
   document.addEventListener("keydown", e => {
     if ((e.key === "Enter" || e.key === " ") && e.target.classList) {
       if (e.target.classList.contains("anno")) { e.preventDefault(); toggleAnno(e.target); return; }
-      if (e.target.hasAttribute && e.target.hasAttribute("data-phrase")) { e.preventDefault(); revealPhrase(e.target); return; }
     }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
       e.preventDefault(); $("#searchInput").focus(); $("#searchInput").select(); return;
@@ -1166,9 +1557,21 @@
     btn.querySelector(".foldall__txt").textContent = anyOpen ? "全部折叠" : "全部展开";
   }
 
-  function revealPhrase(el) {
-    const open = el.classList.toggle("is-open");
-    el.setAttribute("aria-expanded", open);
+  /* 轻提示：一条浮起来的胶囊，两秒后自己消失。只用来说明「这里暂时没有」 */
+  let toastTimer;
+  function toast(msg) {
+    let el = $("#toast");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "toast";
+      el.className = "toast";
+      el.setAttribute("role", "status");
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.classList.add("is-on");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("is-on"), 2600);
   }
 
   function toggleAnno(el) {
@@ -1216,35 +1619,123 @@
     if (route.section === "search") go("#/home");
   });
 
-  /* 主题 */
-  const THEMES = ["auto", "light", "dark"];
+  /* 依赖条件没满足＝这条设置当前不生效。
+     渲染和就地同步必须共用同一个判断，否则两条路径迟早会不一致
+     （踩过：只在同步里加了禁用，初次渲染没加，离开页面再回来禁用就没了）。 */
+  const prefOff = d => !!(d.when && !d.when());
+  const prefHint = d => prefOff(d) ? d.whenHint : d.hint;
+  const foldHint = () => {
+    const n = Object.keys(store.folds || {}).length;
+    return n ? `当前记住了 ${n} 处折叠` : "当前没有记住任何折叠";
+  };
+
+  /* 改完偏好只更新受影响的那几个节点。
+     以前这里是 onRoute() 整页重渲染——DOM 全部重建、入场动画重放一遍、
+     滚动位置还被拉回顶部，点一下底部的开关屏幕就跳一次。 */
+  function afterPrefChange() {
+    applyTheme();
+    syncShuffleBtn();
+    syncPrefUI();
+  }
+
+  function syncPrefUI() {
+    if (route.section !== "settings") return;
+
+    document.querySelectorAll("#view [data-pref], #view [data-preftoggle]").forEach(el => {
+      const id = el.dataset.pref || el.dataset.preftoggle;
+      const d = prefDef(id);
+      if (!d) return;
+      const on = d.type === "enum" ? prefs.is(id, el.dataset.val) : prefs.has(id, el.dataset.val);
+      el.classList.toggle("is-on", on);
+      el.setAttribute("aria-pressed", on);
+      el.disabled = prefOff(d);
+    });
+
+    PREFS.forEach(d => {
+      const rowEl = document.querySelector(`#view [data-prow="${d.id}"]`);
+      if (!rowEl) return;
+      rowEl.classList.toggle("prow--off", prefOff(d));
+      rowEl.querySelector(".prow__hint").textContent = prefHint(d) || "";
+    });
+
+    const fr = document.querySelector('#view [data-prow="act.folds"]');
+    if (fr) {
+      fr.querySelector(".prow__hint").textContent = foldHint();
+      fr.querySelector(".btn").disabled = !Object.keys(store.folds || {}).length;
+    }
+  }
+
+  /* 主题。侧栏那个按钮和设置页改的是同一个值，两边永远一致 */
+  const THEMES = optionIds(prefDef("theme"));
   function applyTheme() {
-    document.documentElement.dataset.theme = store.theme;
-    const dark = store.theme === "dark" ||
-      (store.theme === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
+    const cur = prefs.get("theme");
+    document.documentElement.dataset.theme = cur;
+    const dark = cur === "dark" ||
+      (cur === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
     $("#themeBtn").innerHTML = icon(dark ? "i-moon" : "i-sun", 18);
-    $("#themeBtn").title = "主题：" + { auto: "跟随系统", light: "浅色", dark: "深色" }[store.theme];
+    $("#themeBtn").title = "主题：" + prefDef("theme").options
+      .find(o => o[0] === cur)[1] + "（点击切换）";
   }
   $("#themeBtn").addEventListener("click", () => {
-    store.theme = THEMES[(THEMES.indexOf(store.theme) + 1) % 3];
-    store.saveTheme(); applyTheme();
+    const cur = prefs.get("theme");
+    prefs.set("theme", THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]);
+    applyTheme();
+    syncPrefUI();
   });
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
 
-  /* 随机复习 */
+  /* ---------- 随机复习 ----------
+     抽取范围由 review.scope 决定，只想复习作文就把另外两项关掉 */
+  const REVIEW_SOURCE = {
+    words: () => words.map(x => `#/words/${x.id}`),
+    roots: () => roots.filter(x => prefs.has("review.rootKinds", x.kind))
+                      .map(x => `#/roots/${x.id}`),
+    essays: () => essays.filter(x => prefs.has("review.essayParts", x.part))
+                        .map(x => `#/essays/${x.id}`)
+  };
+  /* 板块 → 它的子范围设置 */
+  const REVIEW_FACET = { roots: "review.rootKinds", essays: "review.essayParts" };
+
+  const reviewPool = () => prefs.get("review.scope")
+    .reduce((a, k) => (REVIEW_SOURCE[k] ? a.concat(REVIEW_SOURCE[k]()) : a), []);
+
+  /* 悬停提示要说清抽的到底是什么：板块名，子范围没全选时补一个括号 */
+  function reviewScopeText() {
+    const d = prefDef("review.scope"), scope = prefs.get("review.scope");
+    const parts = scope.map(k => {
+      const name = d.options.find(o => o[0] === k)[1];
+      const fd = REVIEW_FACET[k] && prefDef(REVIEW_FACET[k]);
+      if (!fd) return name;
+      const picked = prefs.get(fd.id);
+      if (picked.length === fd.options.length) return name;
+      return `${name}（${picked.map(v => fd.options.find(o => o[0] === v)[1]).join("、")}）`;
+    });
+    return (scope.length === d.options.length && parts.every(t => t.indexOf("（") < 0))
+      ? "全部板块" : parts.join(" / ");
+  }
+
+  function syncShuffleBtn() {
+    $("#shuffleBtn").title =
+      `随机复习一条 · ${reviewScopeText()}（${reviewPool().length} 条，范围在设置里改）`;
+  }
+
   $("#shuffleBtn").addEventListener("click", () => {
-    const pool = [
-      ...words.map(w => `#/words/${w.id}`),
-      ...roots.map(r => `#/roots/${r.id}`),
-      ...contrasts.map(c => `#/contrasts/${c.id}`),
-      ...essays.map(e => `#/essays/${e.id}`)
-    ];
-    if (pool.length) go(pool[Math.floor(Math.random() * pool.length)]);
+    let pool = reviewPool();
+    if (!pool.length) { toast("当前复习范围是空的，去设置里勾一项"); return; }
+    if (prefs.is("review.avoidRepeat", "on") && pool.length > 1) {
+      const here = `#/${route.section}${route.id ? "/" + route.id : ""}`;
+      const rest = pool.filter(h => h !== here);
+      if (rest.length) pool = rest;
+    }
+    go(pool[Math.floor(Math.random() * pool.length)]);
   });
 
   /* ---------- 启动 ---------- */
+  prefs.load();
+  tags.load();
   store.load();
   applyTheme();
+  syncShuffleBtn();
   window.addEventListener("hashchange", () => { ctrlOpen = false; onRoute(); });
   if (!location.hash) location.replace("#/home");
   onRoute();
