@@ -452,6 +452,7 @@
       : `${esc(secName(s))}<small>${esc(s.en)}</small>`;
 
     renderNav();
+    if (navOpen()) setNav(false);
     $("#view").innerHTML = VIEWS[route.section] ? VIEWS[route.section](route) : VIEWS.home();
     syncFoldAllBtn();
     window.scrollTo({ top: 0 });
@@ -464,7 +465,8 @@
   /* ---------- 导航 ---------- */
   function renderNav() {
     const active = route.section;
-    /* 侧栏只留图标：名称走 title 和 aria-label，分组用一条分隔线代替小标题 */
+    /* 名称始终写进 DOM：桌面导轨用 CSS 藏起来只留图标（靠 title 提示），
+       手机抽屉里展开显示——那里没有 hover，光给图标是猜谜。 */
     $("#nav").innerHTML = SECTIONS.map(s => {
       const n = s.count();
       const name = secName(s);
@@ -472,13 +474,22 @@
       <li><a class="navitem${s.id === active ? " is-active" : ""}" href="#/${s.id}"
         title="${esc(name)}" aria-label="${esc(name + (n != null ? "，" + n + " 条" : ""))}">
         <span class="navitem__ico">${icon(s.icon, 20)}</span>
+        <span class="navitem__label">${esc(name)}</span>
+        ${n != null ? `<span class="navitem__count">${n}</span>` : ""}
       </a></li>`;
     }).join("");
+  }
 
-    $("#tabbar").innerHTML = SECTIONS.map(s =>
-      `<a class="tab${s.id === active ? " is-active" : ""}" href="#/${s.id}">
-        <span class="tab__ico">${icon(s.icon, 21)}</span><span>${esc(s.label)}</span>
-      </a>`).join("");
+  /* ---------- 手机端抽屉 ----------
+     手机上没有常驻侧栏，导航收进左侧抽屉。用的还是同一个 .rail 元素，
+     只是换一种呈现方式，避免维护两套导航 DOM。 */
+  const navOpen = () => document.body.classList.contains("nav-open");
+  function setNav(open) {
+    document.body.classList.toggle("nav-open", open);
+    $("#scrim").hidden = !open;
+    $("#menuBtn").setAttribute("aria-expanded", open ? "true" : "false");
+    $("#menuBtn").setAttribute("aria-label", open ? "关闭导航" : "打开导航");
+    if (open) { const f = $("#rail").querySelector(".navitem"); if (f) f.focus(); }
   }
 
   /* ============================================================
@@ -1393,6 +1404,11 @@
   document.addEventListener("click", e => {
     const t = e.target;
 
+    if (t.closest("#menuBtn")) { setNav(!navOpen()); return; }
+    if (t.closest("#scrim")) { setNav(false); return; }
+    /* 抽屉里点了某个板块就直接关掉，不用再点一次遮罩 */
+    if (navOpen() && t.closest("#rail .navitem")) setNav(false);
+
     // 收藏（卡片上的星号不应触发跳转）
     const st = t.closest("[data-star]");
     if (st) {
@@ -1518,6 +1534,7 @@
       e.preventDefault(); $("#searchInput").focus(); $("#searchInput").select(); return;
     }
     if (e.key === "Escape") {
+      if (navOpen()) { setNav(false); $("#menuBtn").focus(); return; }
       if (document.activeElement === $("#searchInput")) $("#searchInput").blur();
       const c = $("[data-ctrl]");
       if (c && c.open) { c.open = false; ctrlOpen = false; }
@@ -1715,11 +1732,12 @@
   }
 
   function syncShuffleBtn() {
-    $("#shuffleBtn").title =
-      `随机复习一条 · ${reviewScopeText()}（${reviewPool().length} 条，范围在设置里改）`;
+    const t = `随机复习一条 · ${reviewScopeText()}（${reviewPool().length} 条，范围在设置里改）`;
+    $("#shuffleBtn").title = t;
+    $("#fabShuffle").title = t;
   }
 
-  $("#shuffleBtn").addEventListener("click", () => {
+  function reviewNext() {
     let pool = reviewPool();
     if (!pool.length) { toast("当前复习范围是空的，去设置里勾一项"); return; }
     if (prefs.is("review.avoidRepeat", "on") && pool.length > 1) {
@@ -1728,7 +1746,10 @@
       if (rest.length) pool = rest;
     }
     go(pool[Math.floor(Math.random() * pool.length)]);
-  });
+  }
+  /* 桌面在导轨底部，手机在右下角，同一个动作两个入口 */
+  $("#shuffleBtn").addEventListener("click", reviewNext);
+  $("#fabShuffle").addEventListener("click", reviewNext);
 
   /* ---------- 启动 ---------- */
   prefs.load();

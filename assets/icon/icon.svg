@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="lex">
+  <!-- 底：近黑的中性方块，和界面的墨色同一档 -->
+  <rect width="512" height="512" fill="#1d1d1f"/>
+  <!-- 字标：用正文英文那套衬线字，和词条页面里的单词是同一副面孔 -->
+  <text x="256" y="256" fill="#fdfdfd"
+        font-family="Charter, 'Iowan Old Style', Georgia, 'Times New Roman', serif"
+        font-size="248" font-weight="600" letter-spacing="-8"
+        text-anchor="middle" dominant-baseline="central">lex</text>
+  <!-- 主题色的一点：对应界面里「只给内容上色」那条规则 -->
+  <circle cx="256" cy="372" r="15" fill="#6f66ff"/>
+</svg>

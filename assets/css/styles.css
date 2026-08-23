@@ -98,7 +98,6 @@
   --gap: 12px;                                 /* 悬浮件与窗口边缘的等距留白 */
   --rail: 76px;                                /* 只放图标的导轨：76 - 2×gap = 52px 面板 */
   --topbar: 56px;
-  --tabbar: 58px;
   --safe-b: env(safe-area-inset-bottom, 0px);
 }
 
@@ -267,13 +266,15 @@ input { font: inherit; color: inherit; }
 }
 .nav-sep { width: 24px; height: .5px; background: var(--divider); margin: 6px 0; }
 .navitem:hover { background: var(--fill-1); color: var(--ink); }
-.navitem__ico { display: grid; place-items: center; color: var(--ink-3); transition: color .16s; }
+.navitem__ico { display: grid; place-items: center; flex: none; color: var(--ink-3); transition: color .16s; }
+/* 桌面导轨只留图标，名称交给 title 提示；DOM 里保留文字是为了读屏和手机抽屉 */
+.navitem__label, .navitem__count { display: none; }
+/* 权重要压过后面 .btn 的 display，所以用子选择器而不是单类 */
+.topbar > .topbar__menu { display: none; }
 /* 选中态 = 一块填充，仅此而已（Apple: .navigation-item--selected 只改 background-color） */
 .navitem.is-active { background: var(--fill-2); color: var(--ink); }
 .navitem.is-active .navitem__ico { color: var(--ink); }
 .rail__foot { margin-top: auto; display: flex; flex-direction: column; align-items: center; gap: var(--s2); padding: var(--s3) 0 0; margin-inline: var(--s3); border-top: .5px solid var(--divider); }
-
-.tabbar { display: none; }
 
 /* ---------- 5. 组件 ---------- */
 /* 内容层：平的。填充 + 圆角，没有描边、没有模糊、没有高光。 */
@@ -363,6 +364,29 @@ a.chip { white-space: normal; max-width: 100%; }
 .star:active { transform: scale(.86); }
 .star.is-on { color: var(--warn); }
 .star.is-on svg { fill: currentColor; }
+
+/* 抽屉背后的遮罩：手机上才会出现 */
+.scrim {
+  position: fixed; inset: 0; z-index: 45;
+  background: rgba(0, 0, 0, .32);
+  backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+  opacity: 0; transition: opacity .22s;
+}
+body.nav-open .scrim { opacity: 1; }
+
+/* 右下角「随机复习下一条」。桌面上导轨底部已经有这个按钮，所以只在手机出现 */
+.fab {
+  display: none;
+  position: fixed; z-index: 55;
+  right: var(--gap); bottom: calc(var(--safe-b) + var(--gap));
+  width: 52px; height: 52px; border-radius: 50%;
+  place-items: center; color: var(--ink);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow), var(--rim);
+  transition: transform .12s;
+}
+.fab:active { transform: scale(.92); }
 
 /* 轻提示：功能层的一枚浮起胶囊，内容从底下过 */
 .toast {
@@ -762,29 +786,41 @@ a.chip { white-space: normal; max-width: 100%; }
 /* ---------- 7. 响应式 ---------- */
 @media (max-width: 759px) {
   .app { grid-template-columns: 1fr; }
-  .rail { display: none; }
-  .content { padding: var(--s3) var(--s3) calc(var(--tabbar) + var(--s7) + var(--safe-b)); }
+
+  /* 侧栏变成从左侧滑出的抽屉：同一个元素，换一种呈现 */
+  .rail {
+    position: fixed; top: var(--gap); left: 0; z-index: 50;
+    width: min(76vw, 268px); height: calc(100dvh - var(--gap) * 2);
+    margin: 0 var(--gap);
+    padding: var(--s4) var(--s2);
+    transform: translateX(calc(-100% - var(--gap) * 2));
+    transition: transform .26s cubic-bezier(.2, .8, .3, 1);
+    visibility: hidden;
+  }
+  body.nav-open .rail { transform: none; visibility: visible; }
+
+  .brand { justify-content: flex-start; padding: 0 var(--s3) var(--s4); }
+  .brand__txt { display: block; font-weight: 700; letter-spacing: -.02em; font-size: var(--fs-md); }
+  .brand__txt small { display: block; font-size: 10px; font-weight: 500; letter-spacing: .04em; color: var(--ink-3); }
+
+  /* 抽屉里有地方，就把名称和条数都摆出来 */
+  .navlist { align-items: stretch; gap: 2px; }
+  .navitem { width: auto; height: auto; display: flex; align-items: center; gap: var(--s3); padding: 10px var(--s3); }
+  .navitem__label { display: block; flex: 1; font-size: var(--fs-base); font-weight: 550; }
+  .navitem__count { display: block; font-size: var(--fs-xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  .nav-sep { width: auto; margin: 6px var(--s3); }
+  .rail__foot { flex-direction: row; justify-content: flex-start; gap: var(--s2); }
+
+  .topbar > .topbar__menu { display: grid; margin-left: -4px; }
+  .fab { display: grid; }
+  /* 底部不再有标签栏，只需给右下角那颗按钮让出位置 */
+  .content { padding: var(--s3) var(--s3) calc(var(--safe-b) + 76px); }
   .topbar { padding: 0 var(--s3); gap: var(--s2); }
   .topbar__title small { display: none; }
   .search { max-width: none; }
 
-  /* 底栏也是浮起来的：离三边等距，整圈同样的描边，内容从底下滚过去 */
-  .tabbar {
-    position: fixed; z-index: 60;
-    left: var(--gap); right: var(--gap);
-    bottom: calc(var(--safe-b) + var(--gap));
-    display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
-    height: var(--tabbar); border-radius: var(--r-full);
-    background: var(--glass-bg);
-    backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
-    box-shadow: var(--glass-shadow), var(--rim);
-  }
-  .tab { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; color: var(--ink-3); font-size: 10px; font-weight: 600; transition: color .15s; }
-  .tab.is-active { color: var(--ink); }
-  .tab.is-active .tab__ico { background: var(--fill-2); }
-  .tab__ico { display: grid; place-items: center; width: 40px; height: 26px; border-radius: var(--r-full); transition: background .18s; }
 
-  .toast { bottom: calc(var(--safe-b) + var(--tabbar) + var(--gap) * 2); }
+  .toast { bottom: calc(var(--safe-b) + var(--gap) * 2 + 52px); }
 
   .tagrow { flex-direction: column; gap: 4px; }
   .tagrow__label { width: auto; }
@@ -829,7 +865,7 @@ a.chip { white-space: normal; max-width: 100%; }
     --glass-bg: #1c1c1e; --glass-pop: #2c2c2e; --surface: #1c1c1e;
   }
   body::before { display: none; }
-  .topbar::before, .rail, .tabbar, .ctrl__panel, .glass {
+  .topbar::before, .rail, .fab, .scrim, .ctrl__panel, .glass {
     backdrop-filter: none; -webkit-backdrop-filter: none;
   }
   .topbar::before { background: var(--bg); -webkit-mask-image: none; mask-image: none; }
@@ -847,7 +883,7 @@ a.chip { white-space: normal; max-width: 100%; }
 }
 
 @media print {
-  .rail, .tabbar, .topbar, .star, .btn, .ctrlbar, .backbar { display: none !important; }
+  .rail, .topbar, .star, .btn, .ctrlbar, .backbar, .fab, .scrim { display: none !important; }
   body::before { display: none; }
   .app { grid-template-columns: 1fr; }
   .content { padding: 0; }
